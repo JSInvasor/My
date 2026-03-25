@@ -1,0 +1,14 @@
+{
+  "name": "cf-browser",
+  "version": "1.0.0",
+  "description": "Cloudflare UAM & Turnstile bypass via real browser emulation",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "example": "node example.js",
+    "install:chrome": "npx playwright install chrome"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}
