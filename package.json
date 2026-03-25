@@ -1,14 +1,13 @@
 {
   "name": "cf-browser",
   "version": "1.0.0",
-  "description": "Cloudflare UAM & Turnstile bypass via real browser emulation",
+  "description": "Cloudflare UAM & Turnstile bypass — powered by puppeteer-real-browser",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "example": "node example.js",
-    "install:chrome": "npx playwright install chrome"
+    "example": "node example.js"
   },
   "dependencies": {
-    "playwright": "^1.48.0"
+    "puppeteer-real-browser": "^1.4.0"
   }
 }
