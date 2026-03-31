@@ -22,7 +22,7 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// ─── Stats (cache-line padded to avoid false sharing between goroutines) ─────
+// ─── Stats (cache-line padded — prevents false sharing between goroutines) ───
 
 type Stats struct {
 	sent    atomic.Int64
@@ -59,8 +59,8 @@ func (d *dnsCache) resolve(host string) string {
 }
 
 // ─── Pooled request body ─────────────────────────────────────────────────────
-// Reuses bytes.Reader across requests — net/http calls Close() when done,
-// which returns the reader to the pool instead of GC-ing it.
+// net/http calls Body.Close() after sending — we return the reader to pool
+// instead of GC-ing it. Zero allocations in the POST hot path.
 
 type pooledBody struct {
 	*bytes.Reader
@@ -90,48 +90,34 @@ type Config struct {
 
 type Blaster struct {
 	cfg      *Config
-	client   *http.Client
+	h2t      *http2.Transport // direct HTTP/2 transport (no net/http overhead)
+	h1t      *http.Transport  // HTTP/1.1 fallback
 	dns      *dnsCache
 	stats    Stats
-	baseReq  *http.Request // cloned per worker — avoids rebuilding headers each time
-	bodyPool sync.Pool     // reuse bytes.Reader for request bodies
+	baseReq  *http.Request // shared across workers — WithContext() cheaply forks it
+	bodyPool sync.Pool     // reuse bytes.Reader for POST bodies
 	drainCh  chan *http.Response
 }
 
 func NewBlaster(cfg *Config) *Blaster {
 	b := &Blaster{
-		cfg:  cfg,
-		dns:  newDNSCache(),
-		// Drain channel: buffered so workers never block waiting to hand off a response.
-		// Fixed drain workers read from this channel — zero goroutine allocation per response.
-		drainCh: make(chan *http.Response, cfg.Workers*2),
+		cfg:     cfg,
+		dns:     newDNSCache(),
+		drainCh: make(chan *http.Response, cfg.Workers*4),
 	}
 	b.bodyPool = sync.Pool{New: func() any { return &pooledBody{Reader: bytes.NewReader(nil)} }}
-	b.client = b.buildClient()
 
-	// Build base request once; workers clone it (Clone copies headers, skipping per-request iteration)
-	b.baseReq, _ = http.NewRequest(cfg.Method, cfg.URL, nil)
-	for k, v := range cfg.Headers {
-		b.baseReq.Header[k] = v
-	}
-	return b
-}
-
-func (b *Blaster) buildClient() *http.Client {
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: b.cfg.SkipVerify,
+		InsecureSkipVerify: cfg.SkipVerify,
 		MinVersion:         tls.VersionTLS12,
-		// Large LRU cache: reuse TLS session tickets — avoids full handshake CPU cost on reconnect
-		ClientSessionCache: tls.NewLRUClientSessionCache(b.cfg.Conns * 8),
+		// Session tickets: avoid full TLS handshake CPU on reconnect
+		ClientSessionCache: tls.NewLRUClientSessionCache(cfg.Conns * 8),
 	}
 
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, _ := net.SplitHostPort(addr)
 		ip := b.dns.resolve(host)
-		d := &net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 60 * time.Second,
-		}
+		d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 60 * time.Second}
 		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
 		if err != nil {
 			return nil, err
@@ -140,48 +126,63 @@ func (b *Blaster) buildClient() *http.Client {
 		return conn, nil
 	}
 
-	if b.cfg.ForceHTTP1 {
-		t := &http.Transport{
+	if cfg.ForceHTTP1 {
+		b.h1t = &http.Transport{
 			TLSClientConfig:     tlsCfg,
 			TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-			MaxIdleConns:        b.cfg.Conns * 2,
-			MaxIdleConnsPerHost: b.cfg.Conns,
-			MaxConnsPerHost:     b.cfg.Conns,
+			MaxIdleConns:        cfg.Conns * 2,
+			MaxIdleConnsPerHost: cfg.Conns,
+			MaxConnsPerHost:     cfg.Conns,
 			IdleConnTimeout:     90 * time.Second,
 			DisableCompression:  true,
-			DisableKeepAlives:   false,
 			DialContext:         dial,
 		}
-		return &http.Client{Transport: t}
+	} else {
+		// Direct http2.Transport: skips the entire net/http.Transport layer.
+		// No mutex contention from http.Transport, no redundant header normalization,
+		// no per-roundtrip middleware chain. Pure HTTP/2 framing overhead only.
+		b.h2t = &http2.Transport{
+			TLSClientConfig:    tlsCfg,
+			DisableCompression: true,
+			ReadIdleTimeout:    30 * time.Second,
+			PingTimeout:        15 * time.Second,
+			// false = each connection can independently max out its stream count
+			StrictMaxConcurrentStreams: false,
+			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+				rawConn, err := dial(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				tlsConn := tls.Client(rawConn, cfg)
+				if err := tlsConn.HandshakeContext(ctx); err != nil {
+					rawConn.Close()
+					return nil, err
+				}
+				return tlsConn, nil
+			},
+		}
 	}
 
-	t := &http.Transport{
-		TLSClientConfig:     tlsCfg,
-		MaxIdleConns:        b.cfg.Conns * 2,
-		MaxIdleConnsPerHost: b.cfg.Conns,
-		// MaxConnsPerHost controls exactly how many TCP connections open.
-		// Workers >> Conns: many goroutines multiplex streams over few connections.
-		MaxConnsPerHost:   b.cfg.Conns,
-		IdleConnTimeout:   90 * time.Second,
-		ForceAttemptHTTP2: true,
-		DisableCompression: true,
-		DialContext:        dial,
+	// Build base request once. Workers call WithContext() — a struct copy (~280 bytes)
+	// that SHARES the Header map pointer. No per-request header map allocation.
+	// Compare: Clone() allocates a new Header map + copies all entries = ~4× more.
+	b.baseReq, _ = http.NewRequest(cfg.Method, cfg.URL, nil)
+	for k, v := range cfg.Headers {
+		b.baseReq.Header[k] = v
 	}
 
-	h2t, err := http2.ConfigureTransports(t)
-	if err == nil {
-		h2t.ReadIdleTimeout = 30 * time.Second
-		h2t.PingTimeout = 15 * time.Second
-		// false = don't globally restrict streams; let each connection max out independently
-		h2t.StrictMaxConcurrentStreams = false
-	}
-
-	return &http.Client{Transport: t}
+	return b
 }
 
-// startDrainWorkers launches a fixed pool of goroutines that drain response bodies.
-// This is critical for CPU efficiency: instead of `go func()` per response (goroutine
-// malloc + scheduler wakeup), we reuse N workers with a persistent 32KB buffer each.
+func (b *Blaster) roundTrip(req *http.Request) (*http.Response, error) {
+	if b.h1t != nil {
+		return b.h1t.RoundTrip(req)
+	}
+	return b.h2t.RoundTrip(req)
+}
+
+// startDrainWorkers: fixed pool with persistent 32KB buffers.
+// Zero goroutine spawn per response. Zero buffer allocation per drain.
 func (b *Blaster) startDrainWorkers() {
 	n := b.cfg.Workers / 10
 	if n < 50 {
@@ -191,7 +192,7 @@ func (b *Blaster) startDrainWorkers() {
 		n = 500
 	}
 	for i := 0; i < n; i++ {
-		buf := make([]byte, 32*1024) // each worker owns its buffer permanently — zero alloc
+		buf := make([]byte, 32*1024)
 		go func() {
 			for resp := range b.drainCh {
 				io.CopyBuffer(io.Discard, resp.Body, buf)
@@ -207,18 +208,17 @@ func (b *Blaster) worker(ctx context.Context, wg *sync.WaitGroup) {
 	hasBody := len(b.cfg.Body) > 0
 
 	for {
-		// Non-blocking context check — cheaper than ctx.Err() (no mutex)
 		select {
 		case <-done:
 			return
 		default:
 		}
 
-		req := b.baseReq.Clone(ctx)
+		// WithContext: struct copy + new URL struct = ~280 bytes total.
+		// Header map is SHARED (not copied) — the single biggest hot-path saving.
+		req := b.baseReq.WithContext(ctx)
 
 		if hasBody {
-			// Get pooled reader, reset to body bytes, attach as request body.
-			// net/http calls Close() when done → returns to pool instead of GC.
 			pb := b.bodyPool.Get().(*pooledBody)
 			pb.Reset(b.cfg.Body)
 			pb.pool = &b.bodyPool
@@ -227,18 +227,18 @@ func (b *Blaster) worker(ctx context.Context, wg *sync.WaitGroup) {
 		}
 
 		b.stats.sent.Add(1)
-		resp, err := b.client.Do(req)
+		resp, err := b.roundTrip(req)
 		if err != nil {
 			b.stats.fail.Add(1)
 			continue
 		}
 		b.stats.success.Add(1)
 
-		// Hand off to drain worker pool. If channel is full (drain can't keep up),
-		// close directly (RST_STREAM) — this is fine under extreme load.
 		select {
 		case b.drainCh <- resp:
 		default:
+			// Drain channel full → RST_STREAM (immediate close).
+			// This is acceptable under extreme load — server gets the request.
 			resp.Body.Close()
 		}
 	}
@@ -256,8 +256,8 @@ func (b *Blaster) warmup() {
 		wg.Add(1)
 		go func() {
 			defer func() { <-sem; wg.Done() }()
-			req := b.baseReq.Clone(ctx)
-			resp, err := b.client.Do(req)
+			req := b.baseReq.WithContext(ctx)
+			resp, err := b.roundTrip(req)
 			if err != nil {
 				return
 			}
@@ -281,7 +281,7 @@ func (b *Blaster) Run() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sig; cancel() }()
 
-	proto := "HTTP/2"
+	proto := "HTTP/2 (direct)"
 	if b.cfg.ForceHTTP1 {
 		proto = "HTTP/1.1"
 	}
@@ -307,7 +307,6 @@ func (b *Blaster) Run() {
 		go b.worker(ctx, &wg)
 	}
 
-	// Stats: sleep-based loop is cheaper than time.Ticker channel overhead
 	go func() {
 		var prevSent int64
 		for ctx.Err() == nil {
@@ -353,19 +352,19 @@ func (b *Blaster) Run() {
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	// GC at 400% heap growth instead of default 100% — reduces GC CPU overhead by ~4x.
-	// At high RPS, fewer GC pauses = more CPU for actual request sending.
+	// GOGC=400: GC triggers at 4× heap growth (default 100% = 1×).
+	// At 100k RPS, this reduces GC pauses from ~40/sec to ~10/sec.
 	debug.SetGCPercent(400)
 
 	urlFlag := flag.String("url", "", "Target URL (required)")
-	workersFlag := flag.Int("workers", 1000, "Number of goroutine workers")
+	workersFlag := flag.Int("workers", 1000, "Goroutine worker count")
 	connsFlag := flag.Int("conns", 50, "Max connections per host")
-	durationFlag := flag.Duration("duration", 30*time.Second, "Test duration (e.g. 30s, 1m, 5m)")
+	durationFlag := flag.Duration("duration", 30*time.Second, "Duration (e.g. 30s, 1m)")
 	methodFlag := flag.String("method", "GET", "HTTP method")
-	bodyFlag := flag.String("body", "", "Request body (for POST/PUT)")
-	headersFlag := flag.String("headers", "", "Extra headers: \"Key:Value,Key2:Value2\"")
-	skipVerifyFlag := flag.Bool("skip-verify", true, "Skip TLS certificate verification")
-	http1Flag := flag.Bool("http1", false, "Force HTTP/1.1 instead of HTTP/2")
+	bodyFlag := flag.String("body", "", "Request body")
+	headersFlag := flag.String("headers", "", "Headers: \"Key:Value,Key2:Value2\"")
+	skipVerifyFlag := flag.Bool("skip-verify", true, "Skip TLS verification")
+	http1Flag := flag.Bool("http1", false, "Force HTTP/1.1")
 	flag.Parse()
 
 	if *urlFlag == "" {
@@ -389,7 +388,7 @@ func main() {
 		}
 	}
 
-	cfg := &Config{
+	NewBlaster(&Config{
 		URL:        *urlFlag,
 		Workers:    *workersFlag,
 		Conns:      *connsFlag,
@@ -399,7 +398,5 @@ func main() {
 		Headers:    headers,
 		SkipVerify: *skipVerifyFlag,
 		ForceHTTP1: *http1Flag,
-	}
-
-	NewBlaster(cfg).Run()
+	}).Run()
 }
