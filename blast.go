@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,11 +22,13 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// ─── Stats ────────────────────────────────────────────────────────────────────
+// ─── Stats (cache-line padded to avoid false sharing between goroutines) ─────
 
 type Stats struct {
 	sent    atomic.Int64
+	_       [56]byte
 	success atomic.Int64
+	_       [56]byte
 	fail    atomic.Int64
 }
 
@@ -55,6 +58,20 @@ func (d *dnsCache) resolve(host string) string {
 	return addrs[0]
 }
 
+// ─── Pooled request body ─────────────────────────────────────────────────────
+// Reuses bytes.Reader across requests — net/http calls Close() when done,
+// which returns the reader to the pool instead of GC-ing it.
+
+type pooledBody struct {
+	*bytes.Reader
+	pool *sync.Pool
+}
+
+func (p *pooledBody) Close() error {
+	p.pool.Put(p)
+	return nil
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 type Config struct {
@@ -64,7 +81,7 @@ type Config struct {
 	Duration   time.Duration
 	Method     string
 	Body       []byte
-	Headers    http.Header // pre-canonicalized
+	Headers    http.Header // pre-canonicalized once at startup
 	SkipVerify bool
 	ForceHTTP1 bool
 }
@@ -72,15 +89,31 @@ type Config struct {
 // ─── Blaster ─────────────────────────────────────────────────────────────────
 
 type Blaster struct {
-	cfg    *Config
-	client *http.Client
-	dns    *dnsCache
-	stats  Stats
+	cfg      *Config
+	client   *http.Client
+	dns      *dnsCache
+	stats    Stats
+	baseReq  *http.Request // cloned per worker — avoids rebuilding headers each time
+	bodyPool sync.Pool     // reuse bytes.Reader for request bodies
+	drainCh  chan *http.Response
 }
 
 func NewBlaster(cfg *Config) *Blaster {
-	b := &Blaster{cfg: cfg, dns: newDNSCache()}
+	b := &Blaster{
+		cfg:  cfg,
+		dns:  newDNSCache(),
+		// Drain channel: buffered so workers never block waiting to hand off a response.
+		// Fixed drain workers read from this channel — zero goroutine allocation per response.
+		drainCh: make(chan *http.Response, cfg.Workers*2),
+	}
+	b.bodyPool = sync.Pool{New: func() any { return &pooledBody{Reader: bytes.NewReader(nil)} }}
 	b.client = b.buildClient()
+
+	// Build base request once; workers clone it (Clone copies headers, skipping per-request iteration)
+	b.baseReq, _ = http.NewRequest(cfg.Method, cfg.URL, nil)
+	for k, v := range cfg.Headers {
+		b.baseReq.Header[k] = v
+	}
 	return b
 }
 
@@ -88,8 +121,8 @@ func (b *Blaster) buildClient() *http.Client {
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: b.cfg.SkipVerify,
 		MinVersion:         tls.VersionTLS12,
-		// Session resumption: reuse TLS tickets to avoid full handshakes
-		ClientSessionCache: tls.NewLRUClientSessionCache(b.cfg.Conns * 4),
+		// Large LRU cache: reuse TLS session tickets — avoids full handshake CPU cost on reconnect
+		ClientSessionCache: tls.NewLRUClientSessionCache(b.cfg.Conns * 8),
 	}
 
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -103,14 +136,14 @@ func (b *Blaster) buildClient() *http.Client {
 		if err != nil {
 			return nil, err
 		}
-		applySocketOpts(conn) // TCP_NODELAY, TCP_QUICKACK, large buffers
+		applySocketOpts(conn)
 		return conn, nil
 	}
 
 	if b.cfg.ForceHTTP1 {
 		t := &http.Transport{
 			TLSClientConfig:     tlsCfg,
-			TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper), // disable HTTP/2
+			TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 			MaxIdleConns:        b.cfg.Conns * 2,
 			MaxIdleConnsPerHost: b.cfg.Conns,
 			MaxConnsPerHost:     b.cfg.Conns,
@@ -122,54 +155,77 @@ func (b *Blaster) buildClient() *http.Client {
 		return &http.Client{Transport: t}
 	}
 
-	// HTTP/2: explicit MaxConnsPerHost controls how many TCP connections we open.
-	// Each connection multiplexes all in-flight streams.
-	// Workers >> Conns: many goroutines share few connections via HTTP/2 multiplexing.
 	t := &http.Transport{
 		TLSClientConfig:     tlsCfg,
 		MaxIdleConns:        b.cfg.Conns * 2,
 		MaxIdleConnsPerHost: b.cfg.Conns,
-		MaxConnsPerHost:     b.cfg.Conns,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
-		DisableCompression:  true,
-		DialContext:         dial,
+		// MaxConnsPerHost controls exactly how many TCP connections open.
+		// Workers >> Conns: many goroutines multiplex streams over few connections.
+		MaxConnsPerHost:   b.cfg.Conns,
+		IdleConnTimeout:   90 * time.Second,
+		ForceAttemptHTTP2: true,
+		DisableCompression: true,
+		DialContext:        dial,
 	}
 
-	// ConfigureTransports returns the http2.Transport for fine-grained tuning.
 	h2t, err := http2.ConfigureTransports(t)
 	if err == nil {
 		h2t.ReadIdleTimeout = 30 * time.Second
 		h2t.PingTimeout = 15 * time.Second
-		// Disable strict per-connection stream cap so workers can always send.
+		// false = don't globally restrict streams; let each connection max out independently
 		h2t.StrictMaxConcurrentStreams = false
 	}
 
 	return &http.Client{Transport: t}
 }
 
-func (b *Blaster) newRequest(ctx context.Context) *http.Request {
-	var body io.Reader
-	if len(b.cfg.Body) > 0 {
-		body = bytes.NewReader(b.cfg.Body)
+// startDrainWorkers launches a fixed pool of goroutines that drain response bodies.
+// This is critical for CPU efficiency: instead of `go func()` per response (goroutine
+// malloc + scheduler wakeup), we reuse N workers with a persistent 32KB buffer each.
+func (b *Blaster) startDrainWorkers() {
+	n := b.cfg.Workers / 10
+	if n < 50 {
+		n = 50
 	}
-	req, _ := http.NewRequestWithContext(ctx, b.cfg.Method, b.cfg.URL, body)
-	// Copy pre-canonicalized headers directly (avoids CanonicalHeaderKey overhead per request)
-	for k, v := range b.cfg.Headers {
-		req.Header[k] = v
+	if n > 500 {
+		n = 500
 	}
-	return req
-}
-
-func drainResponse(resp *http.Response) {
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	for i := 0; i < n; i++ {
+		buf := make([]byte, 32*1024) // each worker owns its buffer permanently — zero alloc
+		go func() {
+			for resp := range b.drainCh {
+				io.CopyBuffer(io.Discard, resp.Body, buf)
+				resp.Body.Close()
+			}
+		}()
+	}
 }
 
 func (b *Blaster) worker(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for ctx.Err() == nil {
-		req := b.newRequest(ctx)
+	done := ctx.Done()
+	hasBody := len(b.cfg.Body) > 0
+
+	for {
+		// Non-blocking context check — cheaper than ctx.Err() (no mutex)
+		select {
+		case <-done:
+			return
+		default:
+		}
+
+		req := b.baseReq.Clone(ctx)
+
+		if hasBody {
+			// Get pooled reader, reset to body bytes, attach as request body.
+			// net/http calls Close() when done → returns to pool instead of GC.
+			pb := b.bodyPool.Get().(*pooledBody)
+			pb.Reset(b.cfg.Body)
+			pb.pool = &b.bodyPool
+			req.Body = pb
+			req.ContentLength = int64(len(b.cfg.Body))
+		}
+
 		b.stats.sent.Add(1)
 		resp, err := b.client.Do(req)
 		if err != nil {
@@ -177,25 +233,30 @@ func (b *Blaster) worker(ctx context.Context, wg *sync.WaitGroup) {
 			continue
 		}
 		b.stats.success.Add(1)
-		// Drain response asynchronously — worker doesn't block on response body.
-		// This is what keeps RPS high: the stream is freed as soon as headers arrive.
-		go drainResponse(resp)
+
+		// Hand off to drain worker pool. If channel is full (drain can't keep up),
+		// close directly (RST_STREAM) — this is fine under extreme load.
+		select {
+		case b.drainCh <- resp:
+		default:
+			resp.Body.Close()
+		}
 	}
 }
 
-func (b *Blaster) warmup(conns int) {
+func (b *Blaster) warmup() {
 	fmt.Print("\033[33m[*] Warming up connections...\033[0m\r")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, conns)
-	for i := 0; i < conns; i++ {
+	sem := make(chan struct{}, b.cfg.Conns)
+	for i := 0; i < b.cfg.Conns; i++ {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func() {
 			defer func() { <-sem; wg.Done() }()
-			req := b.newRequest(ctx)
+			req := b.baseReq.Clone(ctx)
 			resp, err := b.client.Do(req)
 			if err != nil {
 				return
@@ -206,18 +267,16 @@ func (b *Blaster) warmup(conns int) {
 	}
 	wg.Wait()
 
-	// Reset stats — warmup sends don't count
 	b.stats.sent.Store(0)
 	b.stats.success.Store(0)
 	b.stats.fail.Store(0)
-	fmt.Print("\033[2K") // clear line
+	fmt.Print("\033[2K")
 }
 
 func (b *Blaster) Run() {
 	ctx, cancel := context.WithTimeout(context.Background(), b.cfg.Duration)
 	defer cancel()
 
-	// Graceful shutdown on CTRL+C
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sig; cancel() }()
@@ -238,9 +297,9 @@ func (b *Blaster) Run() {
 	fmt.Printf("  \033[1mDuration:\033[0m %s\n", b.cfg.Duration)
 	fmt.Println()
 
-	b.warmup(b.cfg.Conns)
+	b.startDrainWorkers()
+	b.warmup()
 
-	// Launch fixed goroutine pool
 	var wg sync.WaitGroup
 	start := time.Now()
 	for i := 0; i < b.cfg.Workers; i++ {
@@ -248,30 +307,24 @@ func (b *Blaster) Run() {
 		go b.worker(ctx, &wg)
 	}
 
-	// Live stats ticker
-	ticker := time.NewTicker(time.Second)
+	// Stats: sleep-based loop is cheaper than time.Ticker channel overhead
 	go func() {
 		var prevSent int64
-		for {
-			select {
-			case <-ctx.Done():
-				ticker.Stop()
-				return
-			case t := <-ticker.C:
-				elapsed := t.Sub(start)
-				curSent := b.stats.sent.Load()
-				curOK := b.stats.success.Load()
-				curFail := b.stats.fail.Load()
-				rps := float64(curSent - prevSent)
-				prevSent = curSent
-				left := b.cfg.Duration - elapsed
-				if left < 0 {
-					left = 0
-				}
-				fmt.Printf("\r\033[2K\033[1;32m RPS: %8.0f\033[0m | Sent: \033[33m%9d\033[0m | OK: \033[32m%9d\033[0m | Fail: \033[31m%7d\033[0m | %ds/%ds",
-					rps, curSent, curOK, curFail,
-					int(elapsed.Seconds()), int(b.cfg.Duration.Seconds()))
+		for ctx.Err() == nil {
+			time.Sleep(time.Second)
+			elapsed := time.Since(start)
+			curSent := b.stats.sent.Load()
+			curOK := b.stats.success.Load()
+			curFail := b.stats.fail.Load()
+			rps := float64(curSent - prevSent)
+			prevSent = curSent
+			left := b.cfg.Duration - elapsed
+			if left < 0 {
+				left = 0
 			}
+			fmt.Printf("\r\033[2K\033[1;32m RPS: %8.0f\033[0m | Sent: \033[33m%9d\033[0m | OK: \033[32m%9d\033[0m | Fail: \033[31m%7d\033[0m | %ds/%ds",
+				rps, curSent, curOK, curFail,
+				int(elapsed.Seconds()), int(b.cfg.Duration.Seconds()))
 		}
 	}()
 
@@ -300,6 +353,9 @@ func (b *Blaster) Run() {
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
+	// GC at 400% heap growth instead of default 100% — reduces GC CPU overhead by ~4x.
+	// At high RPS, fewer GC pauses = more CPU for actual request sending.
+	debug.SetGCPercent(400)
 
 	urlFlag := flag.String("url", "", "Target URL (required)")
 	workersFlag := flag.Int("workers", 1000, "Number of goroutine workers")
@@ -307,7 +363,7 @@ func main() {
 	durationFlag := flag.Duration("duration", 30*time.Second, "Test duration (e.g. 30s, 1m, 5m)")
 	methodFlag := flag.String("method", "GET", "HTTP method")
 	bodyFlag := flag.String("body", "", "Request body (for POST/PUT)")
-	headersFlag := flag.String("headers", "", "Extra headers, comma-separated: \"Key:Value,Key2:Value2\"")
+	headersFlag := flag.String("headers", "", "Extra headers: \"Key:Value,Key2:Value2\"")
 	skipVerifyFlag := flag.Bool("skip-verify", true, "Skip TLS certificate verification")
 	http1Flag := flag.Bool("http1", false, "Force HTTP/1.1 instead of HTTP/2")
 	flag.Parse()
@@ -318,7 +374,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Pre-canonicalize headers to avoid per-request overhead
 	headers := make(http.Header)
 	headers["User-Agent"] = []string{"Mozilla/5.0"}
 	headers["Accept"] = []string{"*/*"}
