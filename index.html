@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antigravity — Build faster than gravity allows</title>
+  <meta name="description" content="Antigravity, yapay zekâ destekli bir geliştirme platformu. Ajanlar, IDE ve tarayıcı entegrasyonu ile yazılımı yerçekiminden bağımsız hale getirin." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="stars" aria-hidden="true"></div>
+  <div class="glow" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="container nav">
+      <a href="#" class="brand" aria-label="Antigravity ana sayfa">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <defs>
+            <linearGradient id="brand-g" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#8ab4ff" />
+              <stop offset="100%" stop-color="#c58aff" />
+            </linearGradient>
+          </defs>
+          <circle cx="16" cy="16" r="14" fill="none" stroke="url(#brand-g)" stroke-width="2" />
+          <path d="M16 4 L16 28 M4 16 L28 16" stroke="url(#brand-g)" stroke-width="1.5" opacity="0.5" />
+          <circle cx="16" cy="16" r="4" fill="url(#brand-g)" />
+        </svg>
+        <span>Antigravity</span>
+      </a>
+
+      <nav class="primary-nav" aria-label="Ana menü">
+        <a href="#product">Ürün</a>
+        <a href="#agents">Ajanlar</a>
+        <a href="#docs">Belgeler</a>
+        <a href="#changelog">Değişiklikler</a>
+        <a href="#pricing">Fiyatlandırma</a>
+      </nav>
+
+      <div class="nav-actions">
+        <a href="#signin" class="link-muted">Giriş yap</a>
+        <a href="#download" class="btn btn-primary">İndir</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container">
+        <p class="eyebrow">
+          <span class="pill">Yeni</span>
+          Antigravity 1.0 erişime açıldı — Gemini 3 Pro desteğiyle
+        </p>
+        <h1 class="hero-title">
+          Yazılımı <span class="gradient-text">yerçekiminden</span><br />
+          bağımsız hale getirin.
+        </h1>
+        <p class="hero-sub">
+          Antigravity; IDE, terminal ve tarayıcıda eşzamanlı çalışan AI ajanlarıyla
+          bir sonraki nesil kod geliştirme platformudur. Plan yapın, uygulayın,
+          doğrulayın — hepsi tek bir yörüngede.
+        </p>
+        <div class="hero-cta">
+          <a href="#download" class="btn btn-primary btn-lg">Ücretsiz indir</a>
+          <a href="#demo" class="btn btn-ghost btn-lg">
+            <span class="play-icon" aria-hidden="true"></span>
+            Demoyu izle
+          </a>
+        </div>
+        <p class="supported">
+          macOS · Windows · Linux üzerinde çalışır
+        </p>
+
+        <div class="hero-visual" role="img" aria-label="Antigravity arayüzü önizleme">
+          <div class="window">
+            <div class="window-bar">
+              <span class="dot dot-r"></span>
+              <span class="dot dot-y"></span>
+              <span class="dot dot-g"></span>
+              <span class="window-title">antigravity · manager</span>
+            </div>
+            <div class="window-body">
+              <aside class="sidebar">
+                <div class="side-title">Ajanlar</div>
+                <ul>
+                  <li class="active">
+                    <span class="status running"></span>
+                    refactor-auth
+                  </li>
+                  <li>
+                    <span class="status idle"></span>
+                    migrate-db
+                  </li>
+                  <li>
+                    <span class="status done"></span>
+                    fix-ci-pipeline
+                  </li>
+                  <li>
+                    <span class="status running"></span>
+                    write-tests
+                  </li>
+                </ul>
+                <button class="new-agent">+ Yeni ajan</button>
+              </aside>
+              <div class="main-pane">
+                <div class="plan-card">
+                  <div class="plan-head">
+                    <span class="badge">PLAN</span>
+                    <span class="plan-title">Oturum sistemini JWT'den session cookie'ye geçir</span>
+                  </div>
+                  <ol class="plan-steps">
+                    <li class="done">Mevcut auth akışını analiz et</li>
+                    <li class="done">`auth/session.ts` dosyasını oluştur</li>
+                    <li class="active">`login` uç noktasını güncelle
+                      <span class="spin" aria-hidden="true"></span>
+                    </li>
+                    <li>Entegrasyon testlerini çalıştır</li>
+                    <li>Tarayıcıda doğrula</li>
+                  </ol>
+                </div>
+                <div class="terminal">
+                  <div class="term-line"><span class="prompt">$</span> antigravity run</div>
+                  <div class="term-line muted">→ Planlama başlatılıyor…</div>
+                  <div class="term-line muted">→ 3/5 adım tamamlandı</div>
+                  <div class="term-line"><span class="ok">✓</span> Testler: 142 geçti, 0 başarısız</div>
+                  <div class="term-line"><span class="caret"></span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="logos" aria-label="Güvenen ekipler">
+      <div class="container">
+        <p class="logos-label">Dünyanın dört bir yanındaki ekipler tarafından güveniliyor</p>
+        <div class="logos-row">
+          <span>ORBITAL</span>
+          <span>Lumenworks</span>
+          <span>HYPERDRIVE</span>
+          <span>northstar</span>
+          <span>VOID/LABS</span>
+          <span>Parallax</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="product" class="features">
+      <div class="container">
+        <h2 class="section-title">Bir ajan değil — <span class="gradient-text">bir filo</span>.</h2>
+        <p class="section-sub">
+          Antigravity; IDE, terminal ve tarayıcıyı tek bir kontrol merkezinden
+          yöneten otonom ajanlar üzerine kurulmuştur.
+        </p>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <div class="feature-icon icon-plan"></div>
+            <h3>Plan-önce modeli</h3>
+            <p>
+              Ajanlar harekete geçmeden önce görevlerini adım adım planlar.
+              Siz onaylarsınız, onlar uygular. Şeffaf, denetlenebilir ve
+              geri alınabilir.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon icon-browser"></div>
+            <h3>Tarayıcı kontrolü</h3>
+            <p>
+              Antigravity, web uygulamanızda gerçek bir tarayıcıyı sürer;
+              formları doldurur, regresyonları yakalar ve sonuçları ekran
+              görüntüleriyle kanıtlar.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon icon-terminal"></div>
+            <h3>Terminal-yerli</h3>
+            <p>
+              Yerel shell'iniz, uzak SSH'lar ve Docker container'ları; hepsi
+              aynı ajan için doğal birer çalışma alanıdır.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon icon-artifact"></div>
+            <h3>Artifakt odaklı</h3>
+            <p>
+              Her çalışma; kod farkı, ekran görüntüsü, test raporu ve
+              açıklayıcı notlardan oluşan imzalı bir artifakt üretir.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon icon-parallel"></div>
+            <h3>Paralel yörünge</h3>
+            <p>
+              10+ ajan aynı anda farklı branch'lerde çalışır. Bağlamlar
+              izole, sonuçlar birleştirilebilirdir.
+            </p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon icon-model"></div>
+            <h3>Model seçimi</h3>
+            <p>
+              Gemini 3 Pro, Claude Opus 4.6, GPT-5 ve daha fazlası.
+              Görev başına en iyi modeli siz seçin — ya da Antigravity
+              otomatik eşleştirsin.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="agents" class="showcase">
+      <div class="container showcase-grid">
+        <div class="showcase-copy">
+          <p class="eyebrow subtle">Agent Manager</p>
+          <h2 class="section-title">Bir kumanda masası.<br />Sonsuz paralel görev.</h2>
+          <p class="section-sub">
+            Her ajanın planını, ilerlemesini ve artifaktlarını tek bir ekrandan
+            izleyin. Durdurun, dallandırın, birleştirin — tıpkı bir git ağacı gibi,
+            ama yürüyen.
+          </p>
+          <ul class="check-list">
+            <li>Gerçek zamanlı plan ve yürütme izleme</li>
+            <li>Artifakt bazlı kod inceleme</li>
+            <li>Aynı görevi farklı modellerle paralel çalıştırma</li>
+            <li>Takım boyutunda ajan paylaşımı</li>
+          </ul>
+          <a href="#docs" class="link-arrow">Ajanlar hakkında daha fazla →</a>
+        </div>
+        <div class="showcase-visual">
+          <div class="orbit">
+            <div class="planet"></div>
+            <div class="ring ring-1"><span class="sat">A</span></div>
+            <div class="ring ring-2"><span class="sat">B</span></div>
+            <div class="ring ring-3"><span class="sat">C</span></div>
+            <div class="ring ring-4"><span class="sat">D</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="changelog" class="metrics">
+      <div class="container">
+        <div class="metric">
+          <div class="metric-value gradient-text">%73</div>
+          <div class="metric-label">daha az tekrar eden manuel iş</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value gradient-text">12x</div>
+          <div class="metric-label">paralel ajan yürütme</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value gradient-text">0 ms</div>
+          <div class="metric-label">plan onayından yürütmeye</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value gradient-text">4.9/5</div>
+          <div class="metric-label">erken erişim geliştirici puanı</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="pricing" class="cta">
+      <div class="container cta-box">
+        <h2>Yerçekimini kırmaya hazır mısınız?</h2>
+        <p>Antigravity 1.0'ı ücretsiz indirin. Kredi kartı gerekmez.</p>
+        <div class="cta-actions">
+          <a href="#download" class="btn btn-primary btn-lg">Antigravity'i indir</a>
+          <a href="#docs" class="btn btn-ghost btn-lg">Belgeleri oku</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-grid">
+      <div class="foot-brand">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <circle cx="16" cy="16" r="14" fill="none" stroke="#8ab4ff" stroke-width="2" />
+            <circle cx="16" cy="16" r="4" fill="#c58aff" />
+          </svg>
+          <span>Antigravity</span>
+        </div>
+        <p class="foot-tag">Build faster than gravity allows.</p>
+      </div>
+      <div class="foot-col">
+        <h4>Ürün</h4>
+        <a href="#">İndir</a>
+        <a href="#">Ajanlar</a>
+        <a href="#">Entegrasyonlar</a>
+        <a href="#">Sürüm notları</a>
+      </div>
+      <div class="foot-col">
+        <h4>Kaynaklar</h4>
+        <a href="#">Belgeler</a>
+        <a href="#">Öğreticiler</a>
+        <a href="#">Topluluk</a>
+        <a href="#">Durum</a>
+      </div>
+      <div class="foot-col">
+        <h4>Şirket</h4>
+        <a href="#">Hakkımızda</a>
+        <a href="#">Kariyer</a>
+        <a href="#">Gizlilik</a>
+        <a href="#">İletişim</a>
+      </div>
+    </div>
+    <div class="container foot-bottom">
+      <span>© 2026 Antigravity Labs</span>
+      <span>Yerçekimi opsiyoneldir.</span>
+    </div>
+  </footer>
+
+  <script src="./script.js" defer></script>
+</body>
+</html>
